@@ -1,16 +1,13 @@
 /**
  * Copyright (C) 2009-2013 Couchbase, Inc.
- *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -22,19 +19,17 @@
 
 package com.couchbase.roadrunner;
 
-import java.lang.reflect.Constructor;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import com.couchbase.client.java.Bucket;
 import com.couchbase.client.java.Cluster;
+import com.couchbase.client.java.CouchbaseCluster;
+import com.couchbase.roadrunner.customConverter.ByteJsonTranscoder;
+import com.couchbase.roadrunner.workloads.DocumentGenerator;
 import com.couchbase.roadrunner.workloads.Workload;
-import com.couchbase.roadrunner.workloads.Workload.DocumentFactory;
 import com.google.common.base.Stopwatch;
 
 /**
@@ -43,136 +38,133 @@ import com.google.common.base.Stopwatch;
  */
 class ClientHandler {
 
-  /** The global configuration object. */
-  private final GlobalConfig config;
+	private final GlobalConfig config;
 
-  /** The ThreadPoolExecutor for managing threads. */
-  private final ThreadPoolExecutor executor;
+	private final ThreadPoolExecutor executor;
 
-  /** Its own Bucket reference. */
-  private final Bucket client;
+	private final Bucket client;
 
-  /** The identifier of this ClientHandler. */
-  private final String id;
+	private final String id;
 
-  /** Number of documents to perform against in this handler. */
-  private final long numDocs;
+	private final long numDocs;
 
-  /** List of deployed workloads. */
-  private List<Workload> workloads;
+	private final int clientOffset;
 
-  /** Used to store the merged measures after runs. */
-  private Map<String, List<Stopwatch>> mergedMeasures;
+	private Map<String, List<Stopwatch>> mergedMeasures;
 
-  /**
-   * Initialize the ClientHandler object.
-   *
-   * @param config the global configuration object.
-   */
-  public ClientHandler(final GlobalConfig config, final Cluster cluster, final String id,
-    final long numDocs)
-    throws Exception {
-    this.config = config;
-    this.id = id;
-    this.numDocs = numDocs;
-    //open the bucket asynchronously and then wait for it
-    this.client = cluster.openBucket(config.getBucket(), config.getPassword()).toBlocking().single();
-    this.executor = new ThreadPoolExecutor(
-      config.getNumThreads(),
-      config.getNumThreads(),
-      1,
-      TimeUnit.HOURS,
-      new ArrayBlockingQueue<Runnable>(config.getNumThreads(), true),
-      new ThreadPoolExecutor.CallerRunsPolicy()
-    );
-    this.workloads = new ArrayList<Workload>();
-    this.mergedMeasures = new HashMap<String, List<Stopwatch>>();
-  }
+	private DocumentGenerator documentGenerator;
 
-  /**
-   * Execute the given workload against the workers.
-   *
-   * @param clazz the Workload class name.
-   * @throws Exception
-   */
-  public void executeWorkload(Class<? extends Workload> clazz, DocumentFactory documentFactory) throws Exception {
-    long docsPerThread =  (long)Math.floor(numDocs/config.getNumThreads());
-    Constructor<? extends Workload> constructor = clazz.getConstructor(
-      Bucket.class, String.class, long.class, int.class, int.class,
-      int.class, DocumentFactory.class);
-    for(int i=0;i<config.getNumThreads();i++) {
-     Workload workload = constructor.newInstance(this.client,
-       this.id + "/Workload-" + (i+1), docsPerThread, config.getRatio(),
-       config.getSampling(), config.getRamp(), documentFactory);
-      workloads.add(workload);
-      executor.execute(workload);
-    }
-  }
+	private List<Workload> workers;
 
-  /**
-   * Cleanup after workload execution and store the measures.
-   *
-   * @throws Exception
-   */
-  public void cleanup() throws Exception {
-    while (true) {
-      if (executor.getActiveCount() == 0) {
-        executor.shutdown();
-        break;
-      }
-    }
-    executor.awaitTermination(1, TimeUnit.MINUTES);
-    storeMeasures();
-    //close bucket and wait for it to close
-    this.client.close().toBlocking().single();
-  }
+	/**
+	 * Initialize the ClientHandler object.
+	 *
+	 * @param config the global configuration object.
+	 */
+	public ClientHandler(GlobalConfig config, String id, long numDocs, int offset,
+						 DocumentGenerator documentGenerator) throws Exception {
+		this.config = config;
+		this.id = id;
+		this.numDocs = numDocs;
+		this.clientOffset = offset;
+		this.documentGenerator = documentGenerator;
 
-  /**
-   * Aggregate and store the calculated measurements.
-   */
-  private void storeMeasures() {
-    for(Workload workload : workloads) {
-      Map<String, List<Stopwatch>> measures = workload.getMeasures();
-      for (Map.Entry<String, List<Stopwatch>> entry : measures.entrySet()) {
-        if(mergedMeasures.containsKey(entry.getKey())) {
-          mergedMeasures.get(entry.getKey()).addAll(entry.getValue());
-        } else {
-          mergedMeasures.put(entry.getKey(), entry.getValue());
-        }
-      }
-    }
-  }
+		Cluster cluster = CouchbaseCluster.create(config.getNodes());
+		this.client = cluster.openBucket(config.getBucket(), config.getPassword(), Collections.singletonList(new ByteJsonTranscoder()));
 
-  /**
-   * Returns the aggregated measures.
-   * @return the measures.
-   */
-  public Map<String, List<Stopwatch>> getMeasures() {
-    return mergedMeasures;
-  }
+		this.executor = new ThreadPoolExecutor(
+				config.getNumThreads(),
+				config.getNumThreads(),
+				1,
+				TimeUnit.HOURS,
+				new ArrayBlockingQueue<Runnable>(config.getNumThreads(), true),
+				new ThreadPoolExecutor.CallerRunsPolicy()
+		);
 
-  public long getTotalOps() {
-    long totalOps = 0;
-    for(Workload workload : workloads) {
-      totalOps += workload.getTotalOps();
-    }
-    return totalOps;
-  }
+		this.workers = new ArrayList<>();
+		this.mergedMeasures = new HashMap<>();
+	}
 
-  public long getMeasuredOps() {
-    long measuredOps = 0;
-    for(Workload workload : workloads) {
-      measuredOps += workload.getMeasuredOps();
-    }
-    return measuredOps;
-  }
+	/**
+	 * Execute the given workload against the workers.
+	 *
+	 * @throws Exception
+	 */
+	public void executeWorkload(DocumentGenerator documentGenerator) throws Exception {
+		int workerThreads = config.getNumThreads()/ config.getNumThreads();
+		int docsPerThread = (int) Math.floor(numDocs / workerThreads);
+		int workerOffset = this.clientOffset;
+		for (int i = 0; i < workerThreads; i++) {
+			Workload workloadWorker = new Workload(this.id + "/Workload-" + (i + 1), this.client, config, documentGenerator, docsPerThread, workerOffset);
+			workers.add(workloadWorker);
+			executor.execute(workloadWorker);
+			workerOffset = this.clientOffset + docsPerThread;
+		}
+	}
 
-  public List<Stopwatch> getThreadElapsed() {
-    List<Stopwatch> elapsed = new ArrayList<Stopwatch>();
-    for(Workload workload : workloads) {
-      elapsed.add(workload.totalElapsed());
-    }
-    return elapsed;
-  }
+	/**
+	 * Cleanup after workload execution and store the measures.
+	 *
+	 * @throws Exception
+	 */
+	public void cleanup() throws Exception {
+		while (true) {
+			if (executor.getActiveCount() == 0) {
+				executor.shutdown();
+				break;
+			}
+		}
+		executor.awaitTermination(1, TimeUnit.MINUTES);
+		storeMeasures();
+		//close bucket and wait for it to close
+		this.client.close();
+	}
 
+	/**
+	 * Aggregate and store the calculated measurements.
+	 */
+	private void storeMeasures() {
+		for (Workload workloadWorker : workers) {
+			Map<String, List<Stopwatch>> measures = workloadWorker.getMeasures();
+			for (Map.Entry<String, List<Stopwatch>> entry : measures.entrySet()) {
+				if (mergedMeasures.containsKey(entry.getKey())) {
+					mergedMeasures.get(entry.getKey()).addAll(entry.getValue());
+				} else {
+					mergedMeasures.put(entry.getKey(), entry.getValue());
+				}
+			}
+		}
+	}
+
+	/**
+	 * Returns the aggregated measures.
+	 * @return the measures.
+	 */
+	public Map<String, List<Stopwatch>> getMeasures() {
+		return mergedMeasures;
+	}
+
+	public long getTotalOps() {
+		long totalOps = 0;
+		for (Workload workloadWorker : workers) {
+			totalOps += workloadWorker.getTotalOps();
+		}
+		return totalOps;
+	}
+
+	public long getMeasuredOps() {
+		long measuredOps = 0;
+		for (Workload workloadWorker : workers) {
+			measuredOps += workloadWorker.getMeasuredOps();
+		}
+		return measuredOps;
+	}
+
+	public List<Stopwatch> getThreadElapsed() {
+		List<Stopwatch> elapsed = new ArrayList<Stopwatch>();
+		for (Workload workloadWorker : workers) {
+			elapsed.add(workloadWorker.totalElapsed());
+		}
+		return elapsed;
+	}
 }

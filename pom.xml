@@ -97,9 +97,19 @@
     </dependency>
     <dependency>
       <groupId>com.couchbase.client</groupId>
-      <artifactId>couchbase-client</artifactId>
-      <version>2.0.0-beta</version>
+      <artifactId>java-client</artifactId>
+      <version>2.3.5</version>
     </dependency>
+      <dependency>
+          <groupId>com.fasterxml.jackson.core</groupId>
+          <artifactId>jackson-core</artifactId>
+          <version>2.8.5</version>
+      </dependency>
+      <dependency>
+          <groupId>com.fasterxml.jackson.core</groupId>
+          <artifactId>jackson-databind</artifactId>
+          <version>2.8.5</version>
+      </dependency>
     <!-- UNIT TESTING -->
     <dependency>
       <groupId>org.testng</groupId>

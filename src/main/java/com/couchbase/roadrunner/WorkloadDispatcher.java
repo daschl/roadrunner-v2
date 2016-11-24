@@ -27,16 +27,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import com.couchbase.roadrunner.workloads.DocumentGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.couchbase.client.java.Cluster;
 import com.couchbase.client.java.CouchbaseCluster;
-import com.couchbase.roadrunner.workloads.Workload;
-import com.couchbase.roadrunner.workloads.Workload.DocumentFactory;
-import com.couchbase.roadrunner.workloads.Workload.FixedSizeRandomDocumentFactory;
-import com.couchbase.roadrunner.workloads.Workload.SingleFileDocumentFactory;
-import com.couchbase.roadrunner.workloads.WorkloadFactory;
 import com.google.common.base.Stopwatch;
 
 /**
@@ -52,6 +48,7 @@ final class WorkloadDispatcher {
   /** The global configuration object. */
   private final GlobalConfig config;
   private final Cluster cluster;
+  private DocumentGenerator documentGenerator;
 
   /** Links to the clientHandlers for each CouchabaseClient. */
   private List<ClientHandler> clientHandlers;
@@ -68,6 +65,7 @@ final class WorkloadDispatcher {
     this.cluster = CouchbaseCluster.create(config.getNodes());
     this.clientHandlers = new ArrayList<ClientHandler>();
     this.mergedMeasures = new HashMap<String, List<Stopwatch>>();
+    this.documentGenerator = new DocumentGenerator(config.getClassName());
   }
 
   /**
@@ -75,15 +73,15 @@ final class WorkloadDispatcher {
    */
   public void init() throws Exception {
     try {
-      long docsPerHandler = (long)Math.floor(
+      int offset = 0;
+      int docsPerHandler = (int)Math.floor(
           config.getNumDocs()/config.getNumClients());
       for (int i=0;i<config.getNumClients();i++) {
-        clientHandlers.add(new ClientHandler(config, cluster, "ClientHandler-"+(i+1),
-            docsPerHandler));
+        clientHandlers.add(new ClientHandler(config, "ClientHandler-"+(i+1), docsPerHandler, offset, this.documentGenerator));
+        offset = offset + docsPerHandler;
       }
     } catch (Exception e) {
-      //fire disconnection and wait for it to be effective
-      cluster.disconnect().toBlocking().single();
+      cluster.disconnect();
       throw e;
     }
   }
@@ -93,23 +91,22 @@ final class WorkloadDispatcher {
    */
   public void dispatchWorkload() throws Exception {
     try {
-      DocumentFactory documentFactory;
-      if (config.getFilename() == null)
-        documentFactory = new FixedSizeRandomDocumentFactory(config.getDocumentSize());
-      else
-        documentFactory = new SingleFileDocumentFactory(config.getFilename());
-
-      Class<? extends Workload> clazz =
-          WorkloadFactory.getWorkload(config.getWorkload());
       for(ClientHandler handler : clientHandlers) {
-        handler.executeWorkload(clazz, documentFactory);
+        handler.executeWorkload(this.documentGenerator);
       }
+      while (getTotalOps() != config.getNumDocs()) {
+        try {
+          Thread.sleep(1000);
+        } catch (InterruptedException ex) {
+
+        }
+      }
+
       for(ClientHandler handler : clientHandlers) {
         handler.cleanup();
       }
     } finally {
-      //fire disconnection and wait for it to be effective
-      cluster.disconnect().toBlocking().single();
+      cluster.disconnect();
     }
   }
 

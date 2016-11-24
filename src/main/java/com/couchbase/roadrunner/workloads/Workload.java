@@ -1,16 +1,13 @@
 /**
  * Copyright (C) 2009-2013 Couchbase, Inc.
- *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -22,237 +19,212 @@
 
 package com.couchbase.roadrunner.workloads;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
-import java.util.UUID;
+import java.util.*;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+
+import com.couchbase.client.java.Bucket;
+import com.couchbase.roadrunner.GlobalConfig;
+import com.couchbase.roadrunner.customConverter.ByteJsonDocument;
+import com.google.common.base.Stopwatch;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import rx.Observable;
 
-import com.couchbase.client.java.Bucket;
-import com.google.common.base.Charsets;
-import com.google.common.base.Stopwatch;
-import com.google.common.io.Files;
+public class Workload implements Runnable {
+	private final Logger logger =
+			LoggerFactory.getLogger(Workload.class.getName());
 
-public abstract class Workload implements Runnable {
+	private final Bucket bucket;
 
-  /** Configure a reusable logger. */
-  private final Logger logger =
-    LoggerFactory.getLogger(Workload.class.getName());
+	private final String workloadName;
 
-  /** Reference to the Couchbase Bucket */
-  private final Bucket bucket;
+	private final GlobalConfig config;
 
-  /** Name of the Workload */
-  private final String workloadName;
+	private long measuredOps;
 
-  /** Counter of total measured ops */
-  private long measuredOps;
+	private volatile long totalOps;
 
-  /** Counter of total ops */
-  private long totalOps;
+	private Stopwatch elapsed;
 
-  /** Ramp time */
-  private long ramp;
+	private Map<String, List<Stopwatch>> measures;
 
-  /** Total runtime of this workload thread */
-  private Stopwatch elapsed;
+	protected DocumentGenerator documentGenerator;
 
-  /** Measures */
-  private Map<String, List<Stopwatch>> measures;
+	private int count;
 
-  private final DocumentFactory documentFactory;
+	private int start;
 
-  public Workload(final Bucket bucket, final String name,
-    final int ramp, final DocumentFactory documentFactory) {
-    this.bucket = bucket;
-    this.workloadName = name;
-    this.measures = new HashMap<String, List<Stopwatch>>();
-    this.measuredOps = 0;
-    this.totalOps = 0;
-    this.ramp = ramp;
-    this.elapsed = new Stopwatch();
-    this.documentFactory = documentFactory;
-  }
+	public Workload(String workloadName, Bucket bucket, GlobalConfig config, DocumentGenerator documentGenerator,
+					int count, int offset) {
+		this.count = count;
+		this.start = offset;
+		this.workloadName = workloadName;
+		this.bucket = bucket;
+		this.config = config;
+		this.measures = new HashMap<>();
+		this.measuredOps = 0;
+		this.totalOps = 0;
+		this.elapsed = new Stopwatch();
+		this.documentGenerator = documentGenerator;
+	}
 
-  public long getTotalOps() {
-    return totalOps;
-  }
+	@Override
+	public void run() {
+		startTimer();
+		Thread.currentThread().setName(getWorkloadName());
+		int numBatches = this.count / config.getBatchSize();
+		CountDownLatch latch = new CountDownLatch(config.getBatchSize());
 
-  public void incrTotalOps() {
-    totalOps++;
-  }
+		int index = this.start;
+		for (int i = 0; i < numBatches; i++) {
+			if (config.getPhase() == "run") {
+				int readCount = (config.getReadratio() * config.getBatchSize()) / 100;
+				int writeCount = (config.getWriteratio() * config.getBatchSize()) / 100;
 
-  public void startTimer() {
-    elapsed.start();
-  }
+				while (writeCount-- > 0) {
+					update(config.getKeyPrefix() + start + index++, false)
+							.doOnError(err -> logger.error("couldn't write" + err))
+							.doOnTerminate(() -> {incrTotalOps();latch.countDown();})
+							.subscribe();
+				}
+				while (readCount-- > 0) {
+					get(config.getKeyPrefix() + start + index++, false)
+							.doOnError(err -> logger.error("couldn't read" + err))
+							.doOnTerminate(() -> {incrTotalOps();latch.countDown();})
+							.subscribe();
+				}
+			} else {
+				int insertCount = config.getBatchSize();
+				while (insertCount-- > 0) {
+					insertWorkload(config.getKeyPrefix() + start + index++)
+							.doOnError(err -> logger.error("couldn't insert" + err))
+							.doOnTerminate(() -> {incrTotalOps();latch.countDown();})
+							.subscribe();
+				}
+			}
+			try {
+				latch.await();
+			} catch (InterruptedException ex) {
+				ex.printStackTrace();
+			}
+		}
 
-  public void endTimer() {
-    elapsed.stop();
-  }
+		try {
+			Thread.sleep((long) Math.random() * config.getMaxThinkTime() + config.getMinThinkTime());
+		} catch (InterruptedException ex) {
+			ex.printStackTrace();
+		}
 
-  /**
-   * Store a measure for later retrieval.
-   *
-   * If the ramp-up time is not yet through, don't measure the
-   * operation.
-   *
-   * @param identifier Identifier of the stopwatch.
-   * @param watch The stopwatch.
-   */
-  public void addMeasure(String identifier, Stopwatch watch) {
-    if (elapsed.elapsed(TimeUnit.SECONDS) < ramp) {
-      return;
-    }
+		endTimer();
+	}
 
-    if(!measures.containsKey(identifier)) {
-      measures.put(identifier, new ArrayList<Stopwatch>());
-    }
-    measures.get(identifier).add(watch);
-    measuredOps++;
-  }
 
-  public Map<String, List<Stopwatch>> getMeasures() {
-    return measures;
-  }
+	private Observable<ByteJsonDocument> update(String key, boolean measure) {
+		if (measure) {
+			return Observable.defer(() -> {
+				Stopwatch watch = new Stopwatch().start();
+				return _update(key)
+						.timeout(1, TimeUnit.SECONDS)
+						.doOnTerminate(() -> {
+							watch.stop();
+							addMeasure("set", watch);
+						});
+			});
+		} else {
+			return _update(key);
+		}
+	}
 
-  public long getMeasuredOps() {
-    return measuredOps;
-  }
+	private Observable<ByteJsonDocument> _update(String key) {
+		final ByteJsonDocument document = documentGenerator.getDocument(key);
+		return getBucket().async().upsert(document);
+	}
 
-  public Stopwatch totalElapsed() {
-    if(elapsed.isRunning()) {
-      throw new IllegalStateException("Stopwatch still running!");
-    }
-    return elapsed;
-  }
+	private Observable<ByteJsonDocument> get(String key, boolean measure) {
+		if (measure) {
+			return Observable.defer(() -> {
+				Stopwatch watch = new Stopwatch().start();
+				return _get(key)
+						.timeout(1, TimeUnit.SECONDS)
+						.doOnTerminate(() -> {
+							watch.stop();
+							addMeasure("get", watch);
+						});
+			});
+		} else {
+			return _get(key);
+		}
+	}
 
-  /**
-   * @return the bucket
-   */
-  protected Bucket getBucket() {
-    return bucket;
-  }
+	private Observable<ByteJsonDocument> _get(String key) {
+		return getBucket().async().get(key, ByteJsonDocument.class);
+	}
 
-  /**
-   * @return the workloadName
-   */
-  public String getWorkloadName() {
-    return workloadName;
-  }
+	private Observable<ByteJsonDocument> insertWorkload(String key) {
+		final ByteJsonDocument document = documentGenerator.getDocument(key);
+		return getBucket().async().insert(document).timeout(1, TimeUnit.SECONDS);
+	}
 
-  /**
-   * @return the logger
-   */
-  public Logger getLogger() {
-    return logger;
-  }
 
-  public String randomKey() {
-    return UUID.randomUUID().toString();
-  }
+	public long getTotalOps() {
+		return totalOps;
+	}
 
-  protected SampleDocument getDocument() {
-    return documentFactory.getDocument();
-  }
+	public void incrTotalOps() {
+		totalOps++;
+	}
 
-  static interface SampleDocument{}
+	public void startTimer() {
+		elapsed.start();
+	}
 
-  /**
-   * This document consists entirely of random bytes.
-   */
-  static class RandomDocument implements Serializable, SampleDocument {
+	public void endTimer() {
+		elapsed.stop();
+	}
 
-    private static final long serialVersionUID = 974277240501163457L;
-    public final byte[] payload;
+	/**
+	 * Store a measure for later retrieval.
+	 *
+	 * @param identifier Identifier of the stopwatch.
+	 * @param watch The stopwatch.
+	 */
+	public void addMeasure(String identifier, Stopwatch watch) {
+		if (!measures.containsKey(identifier)) {
+			measures.put(identifier, new ArrayList<Stopwatch>());
+		}
+		measures.get(identifier).add(watch);
+		measuredOps++;
+	}
 
-    public RandomDocument(int payloadSize) {
-      byte[] bytes = new byte[payloadSize];
-      new Random().nextBytes(bytes);
-      this.payload = bytes;
-    }
-  }
+	public Map<String, List<Stopwatch>> getMeasures() {
+		return measures;
+	}
 
-  /**
-   * Reads a file from disk and uses the contents as the document to be stored.
-   * Each line of the file is trimmed and concatenated down to a single string.
-   * This allows a "friendly" json/xml/other document with formatting to be
-   * given even though the internal representation would not be formatted.
-   *
-   * @author bvesco, May 21, 2013
-   */
-  static class FileReaderDocument implements Serializable, SampleDocument {
+	public long getMeasuredOps() {
+		return measuredOps;
+	}
 
-    private static final long serialVersionUID = 1612506081910846384L;
-    public final byte[] payload;
+	public Stopwatch totalElapsed() {
+		if (elapsed.isRunning()) {
+			throw new IllegalStateException("Stopwatch still running!");
+		}
+		return elapsed;
+	}
 
-    public FileReaderDocument(String filename) throws IOException
-    {
-      File file = new File(filename);
-      List<String> lines = Files.readLines(file, Charsets.UTF_8);
-      StringBuilder sb = new StringBuilder();
-      for (String line : lines)
-      {
-        sb.append(line.trim());
-      }
-      payload = sb.toString().getBytes();
-    }
-  }
+	/**
+	 * @return the bucket
+	 */
+	protected Bucket getBucket() {
+		return bucket;
+	}
 
-  public static interface DocumentFactory{
-    SampleDocument getDocument();
-  }
+	/**
+	 * @return the workloadName
+	 */
+	public String getWorkloadName() {
+		return workloadName;
+	}
 
-  /**
-   * Generates documents of a fixed size but each document has a random sequence
-   * of bytes.
-   *
-   * @author bvesco, May 21, 2013
-   */
-  public static class FixedSizeRandomDocumentFactory implements DocumentFactory {
-
-    private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final int sizeInBytes;
-
-    public FixedSizeRandomDocumentFactory(int sizeInBytes){
-      this.sizeInBytes = sizeInBytes;
-      logger.info("Factory using document size of {} bytes", this.sizeInBytes);
-    }
-
-    @Override
-    public SampleDocument getDocument()
-    {
-        return new RandomDocument(sizeInBytes);
-    }
-  }
-
-  /**
-   * Generates documents with bytes that were read from a file. The same
-   * document is returned every time.
-   *
-   * @author bvesco, May 21, 2013
-   */
-  public static class SingleFileDocumentFactory implements DocumentFactory {
-
-    private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final FileReaderDocument document;
-
-    public SingleFileDocumentFactory(String filename) throws IOException{
-      this.document = new FileReaderDocument(filename);
-      logger.info("Factory using document size of {} bytes from {}", document.payload.length, filename);
-    }
-
-    @Override
-    public SampleDocument getDocument()
-    {
-      return document;
-    }
-  }
 }

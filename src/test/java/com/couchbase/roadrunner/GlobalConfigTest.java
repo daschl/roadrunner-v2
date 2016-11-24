@@ -7,6 +7,7 @@ import org.testng.annotations.Test;
 
 public class GlobalConfigTest
 {
+    /*
     private static int NUM_THREADS = 97;
     private static int NUM_CLIENTS = 55;
     private static int NUM_DOCS = 1234;
@@ -64,5 +65,5 @@ public class GlobalConfigTest
         Assert.assertEquals(config.getRamp(), RAMP_TIME, "ramp");
         Assert.assertEquals(config.getFilename(), FILENAME, "filename");
         Assert.assertEquals(config.getDocumentSize(), DOC_SIZE, "doc size");
-    }
+    }*/
 }
