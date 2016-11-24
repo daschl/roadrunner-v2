@@ -23,6 +23,7 @@ import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import com.couchbase.client.core.time.Delay;
 import com.couchbase.client.java.Bucket;
 import com.couchbase.roadrunner.GlobalConfig;
 import com.couchbase.roadrunner.customConverter.ByteJsonDocument;
@@ -31,6 +32,8 @@ import com.google.common.base.Stopwatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import rx.Observable;
+
+import static com.couchbase.client.java.util.retry.RetryBuilder.any;
 
 public class Workload implements Runnable {
 	private final Logger logger =
