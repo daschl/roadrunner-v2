@@ -91,7 +91,7 @@ class ClientHandler {
 	 * @throws Exception
 	 */
 	public void executeWorkload(DocumentGenerator documentGenerator) throws Exception {
-		int workerThreads = config.getNumThreads()/ config.getNumThreads();
+		int workerThreads = config.getNumThreads()/ config.getNumClients();
 		int docsPerThread = (int) Math.floor(numDocs / workerThreads);
 		int workerOffset = this.clientOffset;
 		for (int i = 0; i < workerThreads; i++) {

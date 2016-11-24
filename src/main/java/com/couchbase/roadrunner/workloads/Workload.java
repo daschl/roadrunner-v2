@@ -44,7 +44,7 @@ public class Workload implements Runnable {
 
 	private long measuredOps;
 
-	private volatile long totalOps;
+	private long totalOps;
 
 	private Stopwatch elapsed;
 
@@ -77,31 +77,48 @@ public class Workload implements Runnable {
 		int numBatches = this.count / config.getBatchSize();
 		CountDownLatch latch = new CountDownLatch(config.getBatchSize());
 
+		int samplingInterval = 0;
+		if (config.getSamplingCount() > 0) {
+			samplingInterval = config.getSamplingCount() / config.getNumThreads();
+		}
+
 		int index = this.start;
 		for (int i = 0; i < numBatches; i++) {
+
 			if (config.getPhase() == "run") {
 				int readCount = (config.getReadratio() * config.getBatchSize()) / 100;
 				int writeCount = (config.getWriteratio() * config.getBatchSize()) / 100;
 
 				while (writeCount-- > 0) {
-					update(config.getKeyPrefix() + start + index++, false)
-							.doOnError(err -> logger.error("couldn't write" + err))
-							.doOnTerminate(() -> {incrTotalOps();latch.countDown();})
-							.subscribe();
+					boolean measure = index != 0 && samplingInterval != 0 && index % samplingInterval == 0;
+					update(config.getKeyPrefix() + start + index, measure)
+							.subscribe(
+									doc -> {},
+									err -> {incrTotalOps();err.printStackTrace();latch.countDown();},
+									() -> {incrTotalOps();latch.countDown();}
+							);
+					index++;
 				}
+
 				while (readCount-- > 0) {
-					get(config.getKeyPrefix() + start + index++, false)
-							.doOnError(err -> logger.error("couldn't read" + err))
-							.doOnTerminate(() -> {incrTotalOps();latch.countDown();})
-							.subscribe();
+					boolean measure = index != 0 && samplingInterval != 0 && index % samplingInterval == 0;
+					get(config.getKeyPrefix() + start + index, measure)
+							.subscribe(
+									doc -> {},
+									err -> {incrTotalOps();err.printStackTrace();latch.countDown();},
+									() -> {incrTotalOps();latch.countDown();}
+							);
+					index++;
 				}
 			} else {
 				int insertCount = config.getBatchSize();
 				while (insertCount-- > 0) {
 					insertWorkload(config.getKeyPrefix() + start + index++)
-							.doOnError(err -> logger.error("couldn't insert" + err))
-							.doOnTerminate(() -> {incrTotalOps();latch.countDown();})
-							.subscribe();
+							.subscribe(
+									doc -> {},
+									err -> {incrTotalOps();err.printStackTrace();latch.countDown();},
+									() -> {incrTotalOps();latch.countDown();}
+							);
 				}
 			}
 			try {
@@ -116,7 +133,7 @@ public class Workload implements Runnable {
 		} catch (InterruptedException ex) {
 			ex.printStackTrace();
 		}
-
+		System.out.println("Completed" + this.workloadName);
 		endTimer();
 	}
 
@@ -172,7 +189,7 @@ public class Workload implements Runnable {
 		return totalOps;
 	}
 
-	public void incrTotalOps() {
+	public synchronized void incrTotalOps() {
 		totalOps++;
 	}
 
