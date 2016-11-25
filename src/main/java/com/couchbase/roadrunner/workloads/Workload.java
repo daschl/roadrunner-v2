@@ -23,6 +23,7 @@ import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import com.couchbase.client.core.BackpressureException;
 import com.couchbase.client.core.time.Delay;
 import com.couchbase.client.java.Bucket;
 import com.couchbase.roadrunner.GlobalConfig;
@@ -32,6 +33,7 @@ import com.google.common.base.Stopwatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import rx.Observable;
+import rx.functions.Func1;
 
 import static com.couchbase.client.java.util.retry.RetryBuilder.any;
 
@@ -159,7 +161,13 @@ public class Workload implements Runnable {
 
 	private Observable<ByteJsonDocument> _update(String key) {
 		final ByteJsonDocument document = documentGenerator.getDocument(key);
-		return getBucket().async().upsert(document);
+		return getBucket().async().upsert(document)
+			.retryWhen(errors -> errors.flatMap((Func1<Throwable, Observable<?>>) throwable -> {
+				if (throwable instanceof BackpressureException) {
+					return Observable.timer(1, TimeUnit.MICROSECONDS);
+				}
+				return Observable.error(throwable);
+			}));
 	}
 
 	private Observable<ByteJsonDocument> get(String key, boolean measure) {
@@ -179,7 +187,13 @@ public class Workload implements Runnable {
 	}
 
 	private Observable<ByteJsonDocument> _get(String key) {
-		return getBucket().async().get(key, ByteJsonDocument.class);
+		return getBucket().async().get(key, ByteJsonDocument.class)
+			.retryWhen(errors -> errors.flatMap((Func1<Throwable, Observable<?>>) throwable -> {
+				if (throwable instanceof BackpressureException) {
+					return Observable.timer(1, TimeUnit.MICROSECONDS);
+				}
+				return Observable.error(throwable);
+			}));
 	}
 
 	private Observable<ByteJsonDocument> insertWorkload(String key) {
